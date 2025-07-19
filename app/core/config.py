@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     # Server settings
     HOST: str = "0.0.0.0"
     PORT: int = 8000
+    BASE_URL: str = "http://localhost:8000"  # Base URL for constructing full URLs
     
     # CORS settings
     ALLOWED_HOSTS: List[str] = ["http://localhost:3000", "http://localhost:8080", "http://localhost:5173"]

@@ -16,6 +16,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT token scheme
 security = HTTPBearer()
+security_optional = HTTPBearer(auto_error=False)  # Don't raise error if no token provided
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash."""
@@ -79,4 +80,37 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
     """Get the current active user."""
     if not current_user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional),
+    db: AsyncSession = Depends(get_db)
+) -> Optional[User]:
+    """Get the current user if authenticated, None otherwise."""
+    if credentials is None:
+        return None
+    
+    try:
+        email = verify_token(credentials.credentials)
+        if email is None:
+            return None
+    except JWTError:
+        return None
+    
+    # Get user from database
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    
+    return user
+
+async def get_current_active_user_optional(
+    current_user: Optional[User] = Depends(get_current_user_optional)
+) -> Optional[User]:
+    """Get the current active user if authenticated, None otherwise."""
+    if current_user is None:
+        return None
+    
+    if not current_user.is_active:
+        return None
+    
     return current_user 

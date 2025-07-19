@@ -6,7 +6,7 @@ from typing import List, Optional
 import uuid
 
 from app.core.database import get_db
-from app.core.security import get_current_active_user
+from app.core.security import get_current_active_user, get_current_active_user_optional
 from app.models.user import User, UserResponse
 from app.models.story import (
     Story, StoryCreate, StoryUpdate, StoryResponse, StoryDetailResponse, StoryStatus,
@@ -195,7 +195,8 @@ async def get_stories(
 @router.get("/{story_id}", response_model=StoryDetailResponse)
 async def get_story(
     story_id: str,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_active_user_optional)
 ):
     """Get a specific story by ID."""
     try:
@@ -223,8 +224,18 @@ async def get_story(
             detail="Story not found"
         )
     
-    # Increment view count
-    if story.analytics and len(story.analytics) > 0:
+    # Authorization check: 
+    # - Published stories can be viewed by anyone (authenticated or not)
+    # - Unpublished stories can only be viewed by their contributors
+    if story.status != StoryStatus.PUBLISHED:
+        if current_user is None or story.contributor_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to view this story"
+            )
+    
+    # Increment view count only for published stories
+    if story.status == StoryStatus.PUBLISHED and story.analytics and len(story.analytics) > 0:
         story.analytics[0].views += 1
         await db.commit()
     

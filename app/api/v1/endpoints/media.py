@@ -46,7 +46,7 @@ def validate_audio_file(file: UploadFile) -> bool:
     return extension in settings.ALLOWED_AUDIO_FORMATS
 
 async def save_file_locally(content: bytes, filename: str) -> str:
-    """Save file locally and return the URL."""
+    """Save file locally and return the full URL."""
     file_path = os.path.join(LOCAL_MEDIA_DIR, filename)
     
     # Ensure directory exists
@@ -56,8 +56,8 @@ async def save_file_locally(content: bytes, filename: str) -> str:
     async with aiofiles.open(file_path, 'wb') as f:
         await f.write(content)
     
-    # Return URL
-    return f"http://localhost:8000/media/files/{filename}"
+    # Return full URL that frontend can access
+    return f"/media/files/{filename}"
 
 async def upload_to_s3(file_path: str, s3_key: str) -> str:
     """Upload file to S3 and return the URL."""
@@ -263,7 +263,7 @@ async def get_audio_url(
     story_id: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """Get a presigned URL for accessing an audio file."""
+    """Get a URL for accessing an audio file (local or S3)."""
     try:
         story_uuid = uuid.UUID(story_id)
     except ValueError:
@@ -288,17 +288,62 @@ async def get_audio_url(
             detail="Audio file not found for this story"
         )
     
-    # Extract S3 key from URL
-    s3_key = story.audio_file_url.split(f"{settings.S3_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/")[1]
+    # Check if file is stored locally or in S3
+    is_local_file = (
+        story.audio_file_url.startswith('/media/files/') or
+        story.audio_file_url.startswith('media/files/') or 
+        story.audio_file_url.startswith('http://localhost:8000/media/files/') or
+        story.audio_file_url.startswith('https://localhost:8000/media/files/') or
+        '/media/files/' in story.audio_file_url
+    )
     
-    # Generate presigned URL
-    presigned_url = generate_presigned_url(s3_key)
-    
-    return {
-        "audio_url": presigned_url,
-        "expires_in": 3600,
-        "story_id": story_id
-    }
+    if is_local_file:
+        # Local file - ensure we return the proper URL format
+        if story.audio_file_url.startswith('/media/files/'):
+            # Already in the correct format
+            local_url = story.audio_file_url
+        elif story.audio_file_url.startswith('media/files/'):
+            # Add leading slash
+            local_url = f"/{story.audio_file_url}"
+        elif 'media/files/' in story.audio_file_url:
+            # Extract the media part from full URLs
+            file_path = story.audio_file_url.split('media/files/')[1]
+            local_url = f"/media/files/{file_path}"
+        else:
+            # Fallback
+            file_path = story.audio_file_url.replace('media/files/', '')
+            local_url = f"/media/files/{file_path}"
+        
+        return {
+            "audio_url": local_url,
+            "expires_in": None,  # Local files don't expire
+            "story_id": story_id
+        }
+    else:
+        # S3 file - use existing S3 logic
+        if not s3_client:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="S3 service not configured"
+            )
+        
+        # Extract S3 key from URL
+        try:
+            s3_key = story.audio_file_url.split(f"{settings.S3_BUCKET_NAME}.s3.{settings.AWS_REGION}.amazonaws.com/")[1]
+        except IndexError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid S3 URL format"
+            )
+        
+        # Generate presigned URL
+        presigned_url = generate_presigned_url(s3_key)
+        
+        return {
+            "audio_url": presigned_url,
+            "expires_in": 3600,
+            "story_id": story_id
+        }
 
 @router.delete("/audio/{story_id}")
 async def delete_audio_file(
@@ -354,26 +399,6 @@ async def delete_audio_file(
     await db.commit()
     
     return {"message": "Audio file deleted successfully"}
-
-@router.get("/files/{file_path:path}")
-async def serve_media_file(file_path: str):
-    """Serve locally stored media files."""
-    full_path = os.path.join(LOCAL_MEDIA_DIR, file_path)
-    
-    # Security check - ensure path is within media directory
-    if not os.path.abspath(full_path).startswith(os.path.abspath(LOCAL_MEDIA_DIR)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
-        )
-    
-    if not os.path.exists(full_path):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="File not found"
-        )
-    
-    return FileResponse(full_path)
 
 @router.get("/health")
 async def media_health_check():
