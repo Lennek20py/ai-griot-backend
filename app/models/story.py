@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey, Enum, Float
+from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey, Enum, Float, Boolean
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -31,7 +31,7 @@ class Story(Base):
     duration_seconds = Column(Integer, nullable=True)
     file_size_bytes = Column(Integer, nullable=True)
     status = Column(Enum(StoryStatus), default=StoryStatus.PROCESSING, index=True)
-    consent_given = Column(String, default=False)  # Boolean as string for flexibility
+    consent_given = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -40,7 +40,7 @@ class Story(Base):
     transcript = relationship("Transcript", back_populates="story", uselist=False)
     translations = relationship("Translation", back_populates="story")
     tags = relationship("Tag", secondary="story_tags", back_populates="stories")
-    analytics = relationship("Analytics", back_populates="story", uselist=False)
+    analytics = relationship("Analytics", back_populates="story")
 
 class Transcript(Base):
     __tablename__ = "transcripts"
@@ -48,7 +48,7 @@ class Transcript(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     story_id = Column(UUID(as_uuid=True), ForeignKey("stories.id"), nullable=False)
     transcript_json = Column(JSONB, nullable=False)  # Timestamped transcript
-    language = Column(String, nullable=False)  # Source language
+    language = Column(String, nullable=False)  # Language of the transcript
     confidence_score = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
@@ -71,7 +71,7 @@ class Translation(Base):
 class Tag(Base):
     __tablename__ = "tags"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, unique=True, nullable=False, index=True)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -79,31 +79,35 @@ class Tag(Base):
     # Relationships
     stories = relationship("Story", secondary="story_tags", back_populates="tags")
 
-# Association table for many-to-many relationship
-class StoryTag(Base):
-    __tablename__ = "story_tags"
-    
-    story_id = Column(UUID(as_uuid=True), ForeignKey("stories.id"), primary_key=True)
-    tag_id = Column(UUID(as_uuid=True), ForeignKey("tags.id"), primary_key=True)
+# Association table for many-to-many relationship between stories and tags
+from sqlalchemy import Table
+story_tags = Table(
+    "story_tags",
+    Base.metadata,
+    Column("story_id", UUID(as_uuid=True), ForeignKey("stories.id"), primary_key=True),
+    Column("tag_id", Integer, ForeignKey("tags.id"), primary_key=True)
+)
 
 class Analytics(Base):
     __tablename__ = "analytics"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    story_id = Column(UUID(as_uuid=True), ForeignKey("stories.id"), nullable=False, unique=True)
+    story_id = Column(UUID(as_uuid=True), ForeignKey("stories.id"), nullable=False)
     views = Column(Integer, default=0)
     listens = Column(Integer, default=0)
     avg_rating = Column(Float, default=0.0)
-    total_ratings = Column(Integer, default=0)
     sentiment_score = Column(Float, nullable=True)
-    entities = Column(JSONB, nullable=True)  # Named entities from NER
+    entities = Column(JSONB, nullable=True)  # Store extracted entities
+    keywords = Column(JSONB, nullable=True)  # Store keywords
+    cultural_analysis = Column(JSONB, nullable=True)  # Store cultural analysis
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # Relationships
     story = relationship("Story", back_populates="analytics")
 
-# Pydantic schemas
+# Pydantic models for API requests/responses
+
 class StoryBase(BaseModel):
     title: str
     description: Optional[str] = None
@@ -116,18 +120,22 @@ class StoryBase(BaseModel):
 class StoryCreate(StoryBase):
     pass
 
-class StoryUpdate(BaseModel):
+class StoryUpdate(StoryBase):
+    """Pydantic model for story updates"""
     title: Optional[str] = None
-    description: Optional[str] = None
-    storyteller_name: Optional[str] = None
-    storyteller_bio: Optional[str] = None
     language: Optional[str] = None
-    geo_location: Optional[Dict[str, Any]] = None
     status: Optional[StoryStatus] = None
+    audio_file_url: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    file_size_bytes: Optional[int] = None
+    tags: Optional[List[int]] = None  # List of tag IDs
 
-class StoryInDB(StoryBase):
-    id: uuid.UUID
-    contributor_id: uuid.UUID
+    class Config:
+        from_attributes = True
+
+class StoryResponse(StoryBase):
+    id: str
+    contributor_id: str
     audio_file_url: str
     duration_seconds: Optional[int] = None
     file_size_bytes: Optional[int] = None
@@ -138,79 +146,65 @@ class StoryInDB(StoryBase):
     class Config:
         from_attributes = True
 
-class StoryResponse(StoryInDB):
-    contributor: Optional["UserResponse"] = None
-    transcript: Optional["TranscriptResponse"] = None
-    translations: List["TranslationResponse"] = []
-    tags: List["TagResponse"] = []
-    analytics: Optional["AnalyticsResponse"] = None
-
-class TranscriptBase(BaseModel):
+class TranscriptCreate(BaseModel):
+    story_id: str
     transcript_json: Dict[str, Any]
     language: str
     confidence_score: Optional[float] = None
 
-class TranscriptCreate(TranscriptBase):
-    story_id: uuid.UUID
-
-class TranscriptResponse(TranscriptBase):
-    id: uuid.UUID
-    story_id: uuid.UUID
+class TranscriptResponse(BaseModel):
+    id: str
+    story_id: str
+    transcript_json: Dict[str, Any]
+    language: str
+    confidence_score: Optional[float] = None
     created_at: datetime
     
     class Config:
         from_attributes = True
 
-class TranslationBase(BaseModel):
+class TranslationCreate(BaseModel):
+    story_id: str
     translated_text: str
     language: str
     confidence_score: Optional[float] = None
 
-class TranslationCreate(TranslationBase):
-    story_id: uuid.UUID
-
-class TranslationResponse(TranslationBase):
-    id: uuid.UUID
-    story_id: uuid.UUID
+class TranslationResponse(BaseModel):
+    id: str
+    story_id: str
+    translated_text: str
+    language: str
+    confidence_score: Optional[float] = None
     created_at: datetime
     
     class Config:
         from_attributes = True
 
-class TagBase(BaseModel):
+class TagCreate(BaseModel):
     name: str
     description: Optional[str] = None
 
-class TagCreate(TagBase):
-    pass
-
-class TagResponse(TagBase):
-    id: uuid.UUID
+class TagResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
     created_at: datetime
     
     class Config:
         from_attributes = True
 
-class AnalyticsBase(BaseModel):
-    views: int = 0
-    listens: int = 0
-    avg_rating: float = 0.0
-    total_ratings: int = 0
+class AnalyticsResponse(BaseModel):
+    id: str
+    story_id: str
+    views: int
+    listens: int
+    avg_rating: float
     sentiment_score: Optional[float] = None
     entities: Optional[Dict[str, Any]] = None
-
-class AnalyticsResponse(AnalyticsBase):
-    id: uuid.UUID
-    story_id: uuid.UUID
+    keywords: Optional[Dict[str, Any]] = None
+    cultural_analysis: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     
     class Config:
-        from_attributes = True
-
-# Update forward references
-StoryResponse.model_rebuild()
-TranscriptResponse.model_rebuild()
-TranslationResponse.model_rebuild()
-TagResponse.model_rebuild()
-AnalyticsResponse.model_rebuild() 
+        from_attributes = True 
