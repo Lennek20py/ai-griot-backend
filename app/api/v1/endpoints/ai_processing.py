@@ -24,6 +24,7 @@ import numpy as np
 from pydub import AudioSegment
 import base64
 import httpx
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user
@@ -35,6 +36,10 @@ from app.models.story import (
 )
 
 router = APIRouter()
+
+# Request models
+class ProcessStoryRequest(BaseModel):
+    story_id: str
 
 # Initialize Google clients
 speech_client = None
@@ -788,14 +793,14 @@ async def generate_story_narration(
 @router.post("/process-story")
 async def process_complete_story(
     background_tasks: BackgroundTasks,
-    story_id: str,
+    request_data: ProcessStoryRequest,
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Process a complete story: transcribe, analyze, and translate"""
     
     # Get story from database
-    result = await db.execute(select(Story).where(Story.id == story_id))
+    result = await db.execute(select(Story).where(Story.id == request_data.story_id))
     story = result.scalar_one_or_none()
     
     if not story:
@@ -811,11 +816,11 @@ async def process_complete_story(
         )
     
     # Add background task to process the story
-    background_tasks.add_task(process_story_background, story_id, db)
+    background_tasks.add_task(process_story_background, request_data.story_id, db)
     
     return {
         "message": "Story processing started",
-        "story_id": story_id,
+        "story_id": request_data.story_id,
         "status": "processing"
     }
 

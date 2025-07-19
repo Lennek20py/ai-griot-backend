@@ -26,8 +26,9 @@ class Story(Base):
     storyteller_name = Column(String, nullable=True)
     storyteller_bio = Column(Text, nullable=True)
     language = Column(String, nullable=False, index=True)  # e.g., "en-US", "fr-FR"
+    origin = Column(String, nullable=True)  # Geographic origin as text (e.g., "Nairobi, Kenya")
     geo_location = Column(JSONB, nullable=True)  # {"lat": 0.0, "lng": 0.0, "country": "Ghana"}
-    audio_file_url = Column(String, nullable=False)
+    audio_file_url = Column(String, nullable=True)  # Allow null initially, will be populated after upload
     duration_seconds = Column(Integer, nullable=True)
     file_size_bytes = Column(Integer, nullable=True)
     status = Column(Enum(StoryStatus), default=StoryStatus.PROCESSING, index=True)
@@ -114,11 +115,14 @@ class StoryBase(BaseModel):
     storyteller_name: Optional[str] = None
     storyteller_bio: Optional[str] = None
     language: str
+    origin: Optional[str] = None  # Geographic origin as text (e.g., "Nairobi, Kenya")
     geo_location: Optional[Dict[str, Any]] = None
     consent_given: bool = False
 
 class StoryCreate(StoryBase):
-    pass
+    audio_file_url: Optional[str] = None  # Audio file URL from upload
+    file_size_bytes: Optional[int] = None  # File size in bytes
+    duration_seconds: Optional[int] = None  # Audio duration in seconds
 
 class StoryUpdate(StoryBase):
     """Pydantic model for story updates"""
@@ -134,8 +138,8 @@ class StoryUpdate(StoryBase):
         from_attributes = True
 
 class StoryResponse(StoryBase):
-    id: str
-    contributor_id: str
+    id: uuid.UUID
+    contributor_id: uuid.UUID
     audio_file_url: str
     duration_seconds: Optional[int] = None
     file_size_bytes: Optional[int] = None
@@ -146,6 +150,33 @@ class StoryResponse(StoryBase):
     class Config:
         from_attributes = True
 
+class StoryDetailResponse(BaseModel):
+    """Comprehensive story response with all related data"""
+    # Basic story fields
+    id: uuid.UUID
+    title: str
+    description: Optional[str] = None
+    storyteller_name: Optional[str] = None
+    storyteller_bio: Optional[str] = None
+    language: str
+    origin: Optional[str] = None
+    geo_location: Optional[Dict[str, Any]] = None
+    consent_given: bool = False
+    contributor_id: uuid.UUID
+    audio_file_url: str
+    duration_seconds: Optional[int] = None
+    file_size_bytes: Optional[int] = None
+    status: StoryStatus
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    # Related data
+    contributor: Optional[Dict[str, Any]] = None
+    transcript: Optional[Dict[str, Any]] = None
+    translations: List[Dict[str, Any]] = []
+    tags: List[Dict[str, Any]] = []
+    analytics: Optional[Dict[str, Any]] = None
+
 class TranscriptCreate(BaseModel):
     story_id: str
     transcript_json: Dict[str, Any]
@@ -153,8 +184,8 @@ class TranscriptCreate(BaseModel):
     confidence_score: Optional[float] = None
 
 class TranscriptResponse(BaseModel):
-    id: str
-    story_id: str
+    id: uuid.UUID
+    story_id: uuid.UUID
     transcript_json: Dict[str, Any]
     language: str
     confidence_score: Optional[float] = None
@@ -170,8 +201,8 @@ class TranslationCreate(BaseModel):
     confidence_score: Optional[float] = None
 
 class TranslationResponse(BaseModel):
-    id: str
-    story_id: str
+    id: uuid.UUID
+    story_id: uuid.UUID
     translated_text: str
     language: str
     confidence_score: Optional[float] = None
@@ -194,8 +225,8 @@ class TagResponse(BaseModel):
         from_attributes = True
 
 class AnalyticsResponse(BaseModel):
-    id: str
-    story_id: str
+    id: uuid.UUID
+    story_id: uuid.UUID
     views: int
     listens: int
     avg_rating: float

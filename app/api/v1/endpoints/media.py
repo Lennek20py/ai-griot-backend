@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import aiofiles
@@ -28,6 +28,11 @@ if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
         region_name=settings.AWS_REGION
     )
 
+# Local storage directory
+LOCAL_MEDIA_DIR = "media/files"
+os.makedirs(LOCAL_MEDIA_DIR, exist_ok=True)
+os.makedirs(f"{LOCAL_MEDIA_DIR}/uploads", exist_ok=True)
+
 def get_file_extension(filename: str) -> str:
     """Get file extension from filename."""
     return os.path.splitext(filename)[1].lower()
@@ -39,6 +44,20 @@ def validate_audio_file(file: UploadFile) -> bool:
     
     extension = get_file_extension(file.filename)
     return extension in settings.ALLOWED_AUDIO_FORMATS
+
+async def save_file_locally(content: bytes, filename: str) -> str:
+    """Save file locally and return the URL."""
+    file_path = os.path.join(LOCAL_MEDIA_DIR, filename)
+    
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    # Save file
+    async with aiofiles.open(file_path, 'wb') as f:
+        await f.write(content)
+    
+    # Return URL
+    return f"http://localhost:8000/media/files/{filename}"
 
 async def upload_to_s3(file_path: str, s3_key: str) -> str:
     """Upload file to S3 and return the URL."""
@@ -77,6 +96,69 @@ def generate_presigned_url(s3_key: str, expiration: int = 3600) -> str:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate presigned URL: {str(e)}"
         )
+
+@router.post("/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Upload a file and return the URL."""
+    # Validate file
+    if not validate_audio_file(file):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file format. Allowed formats: {', '.join(settings.ALLOWED_AUDIO_FORMATS)}"
+        )
+    
+    # Check file size
+    if file.size and file.size > settings.MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File too large. Maximum size: {settings.MAX_FILE_SIZE / (1024*1024)}MB"
+        )
+    
+    # Generate unique filename
+    file_extension = get_file_extension(file.filename)
+    unique_filename = f"uploads/{uuid.uuid4()}{file_extension}"
+    
+    try:
+        # Read file content
+        content = await file.read()
+        
+        # Try S3 upload first, fall back to local storage
+        audio_url = None
+        if s3_client:
+            try:
+                # Save file temporarily for S3 upload
+                temp_file = tempfile.NamedTemporaryFile(delete=False)
+                temp_file_path = temp_file.name
+                async with aiofiles.open(temp_file_path, 'wb') as f:
+                    await f.write(content)
+                
+                audio_url = await upload_to_s3(temp_file_path, unique_filename)
+                
+                # Clean up temp file
+                os.unlink(temp_file_path)
+            except Exception as e:
+                print(f"S3 upload failed, falling back to local storage: {e}")
+                audio_url = None
+        
+        # Fall back to local storage if S3 failed or not configured
+        if not audio_url:
+            audio_url = await save_file_locally(content, unique_filename)
+        
+        return {
+            "file_url": audio_url,
+            "file_size": len(content),
+            "message": "File uploaded successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload file: {str(e)}"
+        )
+
 
 @router.post("/upload-audio")
 async def upload_audio_file(
@@ -129,20 +211,31 @@ async def upload_audio_file(
     file_extension = get_file_extension(file.filename)
     unique_filename = f"{story_id}/{uuid.uuid4()}{file_extension}"
     
-    # Save file temporarily
-    temp_file_path = None
     try:
-        # Create temp file
-        temp_file = tempfile.NamedTemporaryFile(delete=False)
-        temp_file_path = temp_file.name
-        
-        # Read and write file content
+        # Read file content
         content = await file.read()
-        async with aiofiles.open(temp_file_path, 'wb') as f:
-            await f.write(content)
         
-        # Upload to S3
-        audio_url = await upload_to_s3(temp_file_path, unique_filename)
+        # Try S3 upload first, fall back to local storage
+        audio_url = None
+        if s3_client:
+            try:
+                # Save file temporarily for S3 upload
+                temp_file = tempfile.NamedTemporaryFile(delete=False)
+                temp_file_path = temp_file.name
+                async with aiofiles.open(temp_file_path, 'wb') as f:
+                    await f.write(content)
+                
+                audio_url = await upload_to_s3(temp_file_path, unique_filename)
+                
+                # Clean up temp file
+                os.unlink(temp_file_path)
+            except Exception as e:
+                print(f"S3 upload failed, falling back to local storage: {e}")
+                audio_url = None
+        
+        # Fall back to local storage if S3 failed or not configured
+        if not audio_url:
+            audio_url = await save_file_locally(content, unique_filename)
         
         # Update story with audio file information
         story.audio_file_url = audio_url
@@ -164,10 +257,6 @@ async def upload_audio_file(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to upload audio file: {str(e)}"
         )
-    finally:
-        # Clean up temp file
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.unlink(temp_file_path)
 
 @router.get("/audio/{story_id}")
 async def get_audio_url(
@@ -265,6 +354,26 @@ async def delete_audio_file(
     await db.commit()
     
     return {"message": "Audio file deleted successfully"}
+
+@router.get("/files/{file_path:path}")
+async def serve_media_file(file_path: str):
+    """Serve locally stored media files."""
+    full_path = os.path.join(LOCAL_MEDIA_DIR, file_path)
+    
+    # Security check - ensure path is within media directory
+    if not os.path.abspath(full_path).startswith(os.path.abspath(LOCAL_MEDIA_DIR)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+    
+    if not os.path.exists(full_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    return FileResponse(full_path)
 
 @router.get("/health")
 async def media_health_check():

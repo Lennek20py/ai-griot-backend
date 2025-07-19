@@ -9,13 +9,13 @@ from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.user import User, UserResponse
 from app.models.story import (
-    Story, StoryCreate, StoryUpdate, StoryResponse, StoryStatus,
+    Story, StoryCreate, StoryUpdate, StoryResponse, StoryDetailResponse, StoryStatus,
     Tag, TagCreate, TagResponse, Analytics, AnalyticsResponse
 )
 
 router = APIRouter()
 
-@router.post("/", response_model=StoryResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=StoryDetailResponse, status_code=status.HTTP_201_CREATED)
 async def create_story(
     story_data: StoryCreate,
     current_user: User = Depends(get_current_active_user),
@@ -38,12 +38,39 @@ async def create_story(
     db.add(analytics)
     await db.commit()
     
-    # Return story with relationships
-    story_response = StoryResponse.from_orm(db_story)
-    story_response.contributor = UserResponse.from_orm(current_user)
-    story_response.analytics = AnalyticsResponse.from_orm(analytics)
+    # Manually construct the response to avoid ORM relationship issues
+    user_response = UserResponse.from_orm(current_user)
+    analytics_response = AnalyticsResponse.from_orm(analytics)
     
-    return story_response
+    # Create comprehensive response
+    response = StoryDetailResponse(
+        # Basic story fields
+        id=db_story.id,
+        title=db_story.title,
+        description=db_story.description,
+        storyteller_name=db_story.storyteller_name,
+        storyteller_bio=db_story.storyteller_bio,
+        language=db_story.language,
+        origin=db_story.origin,
+        geo_location=db_story.geo_location,
+        consent_given=db_story.consent_given,
+        contributor_id=db_story.contributor_id,
+        audio_file_url=db_story.audio_file_url,
+        duration_seconds=db_story.duration_seconds,
+        file_size_bytes=db_story.file_size_bytes,
+        status=db_story.status,
+        created_at=db_story.created_at,
+        updated_at=db_story.updated_at,
+        
+        # Related data
+        contributor=user_response.dict(),
+        transcript=None,  # No transcript initially
+        translations=[],  # No translations initially
+        tags=[],  # No tags initially
+        analytics=analytics_response.dict()
+    )
+    
+    return response
 
 @router.get("/", response_model=List[StoryResponse])
 async def get_stories(
