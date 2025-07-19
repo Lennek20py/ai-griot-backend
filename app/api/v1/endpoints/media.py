@@ -11,7 +11,7 @@ import aiofiles
 import tempfile
 
 from app.core.database import get_db
-from app.core.security import get_current_active_user
+from app.core.security import get_current_active_user, get_current_active_user_optional
 from app.core.config import settings
 from app.models.user import User
 from app.models.story import Story, StoryStatus
@@ -410,4 +410,40 @@ async def media_health_check():
         "s3_status": s3_status,
         "max_file_size": settings.MAX_FILE_SIZE,
         "allowed_formats": settings.ALLOWED_AUDIO_FORMATS
-    } 
+    }
+
+@router.get("/files/{file_path:path}")
+async def serve_media_file(
+    file_path: str,
+    current_user: Optional[User] = Depends(get_current_active_user_optional)
+):
+    """Serve media files directly."""
+    try:
+        # Construct the full file path
+        full_path = os.path.join(LOCAL_MEDIA_DIR, file_path)
+        
+        # Security check: ensure the path is within the media directory
+        if not os.path.abspath(full_path).startswith(os.path.abspath(LOCAL_MEDIA_DIR)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+        
+        # Check if file exists
+        if not os.path.exists(full_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not found"
+            )
+        
+        # Return the file
+        return FileResponse(
+            full_path,
+            media_type="audio/wav" if full_path.endswith('.wav') else "audio/mpeg"
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to serve file: {str(e)}"
+        ) 

@@ -25,6 +25,10 @@ from pydub import AudioSegment
 import base64
 import httpx
 from pydantic import BaseModel
+import enum
+from datetime import datetime
+from pydantic import Field
+from sqlalchemy import text
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user
@@ -132,35 +136,121 @@ class AudioProcessor:
 
 
 class TranslationProcessor:
-    """Handles translation using Google Cloud Translate"""
+    """Handles translation using Google Cloud Translate with Gemini fallback"""
     
     @staticmethod
     async def translate_text(text: str, target_language: str, source_language: str = "auto") -> Dict[str, Any]:
-        """Translate text to target language"""
-        if not translate_instance:
+        """Translate text to target language with fallback to Gemini"""
+        
+        # Try Google Cloud Translate first
+        if translate_instance:
+            try:
+                result = translate_instance.translate(
+                    text,
+                    target_language=target_language,
+                    source_language=source_language
+                )
+                
+                return {
+                    "translated_text": result["translatedText"],
+                    "source_language": result.get("detectedSourceLanguage", source_language),
+                    "target_language": target_language,
+                    "confidence": 1.0,  # Google Translate doesn't provide confidence scores
+                    "method": "google_translate"
+                }
+            except Exception as e:
+                print(f"⚠️ Google Translate failed for {target_language}: {e}")
+            
+        # Fallback to Gemini for translation
+        if genai_client:
+            try:
+                return await TranslationProcessor.translate_with_gemini(text, target_language, source_language)
+            except Exception as e:
+                print(f"⚠️ Gemini translation failed for {target_language}: {e}")
+        
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Google Translate client not configured"
+                detail=f"Translation failed: No translation service available for {target_language}"
+            )
+    
+    @staticmethod
+    async def translate_with_gemini(text: str, target_language: str, source_language: str = "auto") -> Dict[str, Any]:
+        """Translate text using Gemini AI"""
+        if not genai_client:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Gemini client not configured"
             )
         
+        # Language name mapping
+        language_names = {
+            "sw": "Swahili",
+            "en": "English", 
+            "fr": "French",
+            "es": "Spanish",
+            "ar": "Arabic",
+            "pt": "Portuguese",
+            "de": "German",
+            "it": "Italian",
+            "hi": "Hindi",
+            "ja": "Japanese",
+            "zh": "Chinese"
+        }
+        
+        target_name = language_names.get(target_language, target_language)
+        source_name = language_names.get(source_language.split("-")[0] if source_language != "auto" else "auto", "the source language")
+        
+        # Special instructions for different target languages
+        special_instructions = ""
+        if target_language == "sw":
+            special_instructions = """
+            Special considerations for Swahili translation:
+            - Use proper Swahili grammar and verb conjugations
+            - Preserve cultural concepts and traditional terms
+            - Include appropriate honorifics (Mzee, Bibi, Bwana, etc.)
+            - Maintain storytelling elements (Hadithi, palikuwa, etc.)
+            - Use Arabic loanwords where appropriate
+            """
+        elif target_language == "ar":
+            special_instructions = """
+            Special considerations for Arabic translation:
+            - Use classical Arabic for formal content
+            - Preserve Islamic and cultural terminology
+            - Maintain proper Arabic grammar and structure
+            """
+        
+        prompt = f"""
+        Please translate the following text from {source_name} to {target_name}.
+        
+        {special_instructions}
+        
+        Requirements:
+        - Provide an accurate, natural translation
+        - Preserve the meaning and cultural context
+        - Maintain the storytelling style and tone
+        - Keep proper nouns and names as appropriate
+        
+        Text to translate:
+        {text}
+        
+        Please respond with only the translated text, no additional commentary.
+        """
+        
         try:
-            result = translate_instance.translate(
-                text,
-                target_language=target_language,
-                source_language=source_language
-            )
+            response = genai_client.generate_content(prompt)
+            translated_text = response.text.strip()
             
             return {
-                "translated_text": result["translatedText"],
-                "source_language": result.get("detectedSourceLanguage", source_language),
+                "translated_text": translated_text,
+                "source_language": source_language,
                 "target_language": target_language,
-                "confidence": 1.0  # Google Translate doesn't provide confidence scores
+                "confidence": 0.8,  # Estimated confidence for Gemini
+                "method": "gemini"
             }
-            
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Translation failed: {str(e)}"
+                detail=f"Gemini translation failed: {str(e)}"
             )
 
 
@@ -606,6 +696,268 @@ class GeminiProcessor:
             return transcript_text  # Return original if enhancement fails
 
 
+class GeminiTranscriptionProcessor:
+    """Handles audio transcription using Google Gemini"""
+    
+    @staticmethod
+    def clean_words_array(words: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Clean and validate words array to ensure proper structure.
+        
+        Args:
+            words: List of word dictionaries that may be malformed
+            
+        Returns:
+            Cleaned list of word dictionaries with proper structure
+        """
+        cleaned_words = []
+        
+        for word_data in words:
+            # Skip if not a dictionary
+            if not isinstance(word_data, dict):
+                continue
+                
+            # Extract word text - handle various possible formats
+            word_text = None
+            if "word" in word_data:
+                word_text = word_data["word"]
+            elif "text" in word_data:
+                word_text = word_data["text"]
+            
+            # Skip if no valid word text found
+            if not word_text or not isinstance(word_text, str):
+                continue
+                
+            # Clean the word text
+            word_text = word_text.strip()
+            if not word_text:
+                continue
+                
+            # Extract and validate timestamps
+            start_time = None
+            end_time = None
+            
+            # Try to get start_time
+            if "start_time" in word_data:
+                try:
+                    start_time = float(word_data["start_time"])
+                except (ValueError, TypeError):
+                    pass
+            elif "start" in word_data:
+                try:
+                    start_time = float(word_data["start"])
+                except (ValueError, TypeError):
+                    pass
+                    
+            # Try to get end_time
+            if "end_time" in word_data:
+                try:
+                    end_time = float(word_data["end_time"])
+                except (ValueError, TypeError):
+                    pass
+            elif "end" in word_data:
+                try:
+                    end_time = float(word_data["end"])
+                except (ValueError, TypeError):
+                    pass
+            
+            # If we have valid timestamps, add to cleaned words
+            if start_time is not None and end_time is not None and start_time < end_time:
+                cleaned_words.append({
+                    "word": word_text,
+                    "start_time": start_time,
+                    "end_time": end_time
+                })
+        
+        return cleaned_words
+    
+    @staticmethod
+    def regenerate_words_from_text(text: str, total_duration: float = 300.0) -> List[Dict[str, Any]]:
+        """
+        Regenerate word-level timestamps from text when original timestamps are corrupted.
+        
+        Args:
+            text: The transcript text
+            total_duration: Estimated total duration in seconds
+            
+        Returns:
+            List of word dictionaries with estimated timestamps
+        """
+        if not text:
+            return []
+        
+        # Split text into words
+        import re
+        words = re.findall(r'\b\w+\b', text)
+        
+        if not words:
+            return []
+        
+        # Estimate timing - distribute evenly across total duration
+        word_duration = total_duration / len(words)
+        
+        words_array = []
+        for i, word in enumerate(words):
+            start_time = i * word_duration
+            end_time = (i + 1) * word_duration
+            words_array.append({
+                "word": word,
+                "start_time": start_time,
+                "end_time": end_time
+            })
+        
+        return words_array
+    
+    @staticmethod
+    async def transcribe_audio_with_gemini(audio_file_path: str, language: str = "sw-KE") -> Dict[str, Any]:
+        """Transcribe audio using Gemini's audio capabilities"""
+        if not genai_client:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Gemini client not configured"
+            )
+        
+        try:
+            # Read audio file
+            with open(audio_file_path, "rb") as audio_file:
+                audio_content = audio_file.read()
+            
+            # Convert audio to base64 for Gemini
+            audio_base64 = base64.b64encode(audio_content).decode('utf-8')
+            
+            # Prepare prompt for transcription
+            is_swahili = language.startswith('sw')
+            language_instructions = ""
+            if is_swahili:
+                language_instructions = """
+                This is a Swahili audio story. Please:
+                - Preserve traditional Swahili storytelling elements (hadithi, methali, hekaya)
+                - Maintain proper Swahili grammar and verb conjugations
+                - Keep Arabic loanwords and Islamic terminology intact
+                - Preserve cultural honorifics (Mzee, Bibi, Bwana, etc.)
+                - Include traditional expressions and idioms
+                """
+            
+            prompt = f"""
+            Please transcribe this audio file accurately. 
+
+            Language: {language}
+            {language_instructions}
+
+            Please return the result in this EXACT JSON format:
+            {{
+                "text": "full transcribed text",
+                "confidence": 0.95,
+                "language_detected": "{language}",
+                "words": [
+                    {{"word": "word1", "start_time": 0.0, "end_time": 1.0}},
+                    {{"word": "word2", "start_time": 1.0, "end_time": 2.0}}
+                ]
+            }}
+
+            IMPORTANT: 
+            - Return ONLY valid JSON, no extra text or formatting
+            - Each word must have "word", "start_time", and "end_time" fields
+            - start_time must be less than end_time for each word
+            - If you cannot determine exact word timings, provide an estimated breakdown
+            """
+            
+            # Create audio part for Gemini
+            audio_part = {
+                "mime_type": "audio/wav",
+                "data": audio_base64
+            }
+            
+            # Generate transcription
+            response = genai_client.generate_content([prompt, audio_part])
+            
+            try:
+                # Clean the response text to handle potential JSON formatting issues
+                response_text = response.text.strip()
+                
+                # Remove any markdown formatting that might be present
+                if response_text.startswith("```json"):
+                    response_text = response_text[7:]
+                if response_text.endswith("```"):
+                    response_text = response_text[:-3]
+                response_text = response_text.strip()
+                
+                # Parse JSON response
+                result = json.loads(response_text)
+                
+                # Extract and validate the response
+                text = result.get("text", "")
+                confidence = result.get("confidence", 0.8)
+                words = result.get("words", [])
+                
+                # Clean and validate words array
+                cleaned_words = GeminiTranscriptionProcessor.clean_words_array(words)
+                
+                # If cleaning resulted in significant loss, regenerate from text
+                if len(cleaned_words) < len(words) * 0.5 and text:
+                    print(f"⚠️  Significant word data loss, regenerating from text...")
+                    cleaned_words = GeminiTranscriptionProcessor.regenerate_words_from_text(text)
+                
+                return {
+                    "text": text,
+                    "confidence": confidence,
+                    "words": cleaned_words,
+                    "language": result.get("language_detected", language),
+                    "method": "gemini"
+                }
+                
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing failed: {e}")
+                print(f"Response text: {response.text[:500]}...")
+                
+                # Fallback: try to extract text and generate basic word structure
+                fallback_text = response.text.strip()
+                
+                # Remove any markdown or formatting
+                if fallback_text.startswith("```"):
+                    lines = fallback_text.split('\n')
+                    fallback_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else fallback_text
+                
+                # Generate basic word structure
+                fallback_words = GeminiTranscriptionProcessor.regenerate_words_from_text(fallback_text)
+                
+                return {
+                    "text": fallback_text,
+                    "confidence": 0.7,
+                    "words": fallback_words,
+                    "language": language,
+                    "method": "gemini_fallback"
+                }
+                
+        except Exception as e:
+            # Fallback to Google Cloud Speech-to-Text if Gemini fails
+            print(f"Gemini transcription failed, falling back to Google Speech-to-Text: {e}")
+            return await SpeechToTextProcessor.transcribe_full_audio(audio_file_path, language)
+
+
+# Add new progress tracking models
+class ProcessingStep(str, enum.Enum):
+    UPLOADING = "uploading"
+    TRANSCRIBING = "transcribing"
+    ENHANCING = "enhancing"
+    ANALYZING = "analyzing"
+    TRANSLATING = "translating"
+    PUBLISHED = "published"
+    FAILED = "failed"
+
+class StoryProcessingStatus(BaseModel):
+    story_id: str
+    current_step: ProcessingStep
+    progress_percentage: int
+    message: str
+    error: Optional[str] = None
+    transcript_text: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+# Store processing status in memory (in production, use Redis)
+PROCESSING_STATUS_STORE: Dict[str, StoryProcessingStatus] = {}
+
+
 # API Endpoints
 
 @router.post("/transcribe")
@@ -736,24 +1088,12 @@ async def generate_story_narration(
     # Determine text to use
     if use_translation and language != story.language.split("-")[0]:
         # Get translation
-        translation_result = await db.execute(
-            select(Translation).where(
-                Translation.story_id == story_id,
-                Translation.language == language
-            )
+        translation_result = await TranslationProcessor.translate_text(
+            transcript.transcript_json.get("enhanced_text", 
+                                         transcript.transcript_json.get("original_text", "")),
+            language, story.language.split("-")[0]
         )
-        translation = translation_result.scalar_one_or_none()
-        
-        if translation:
-            text_to_speak = translation.translated_text
-        else:
-            # Generate translation on the fly
-            enhanced_text = transcript.transcript_json.get("enhanced_text", 
-                                                         transcript.transcript_json.get("original_text", ""))
-            translation_result = await TranslationProcessor.translate_text(
-                enhanced_text, language, story.language.split("-")[0]
-            )
-            text_to_speak = translation_result["translated_text"]
+        text_to_speak = translation_result["translated_text"]
     else:
         # Use original enhanced transcript
         text_to_speak = transcript.transcript_json.get("enhanced_text", 
@@ -825,30 +1165,125 @@ async def process_complete_story(
     }
 
 
+async def update_processing_status(story_id: str, step: ProcessingStep, progress: int, message: str, transcript_text: Optional[str] = None, error: Optional[str] = None):
+    """Update processing status for a story"""
+    status = StoryProcessingStatus(
+        story_id=story_id,
+        current_step=step,
+        progress_percentage=progress,
+        message=message,
+        transcript_text=transcript_text,
+        error=error
+    )
+    PROCESSING_STATUS_STORE[story_id] = status
+
 async def process_story_background(story_id: str, db: AsyncSession):
-    """Background task to process story completely"""
-    try:
-        # Get story from database
-        result = await db.execute(select(Story).where(Story.id == story_id))
-        story = result.scalar_one_or_none()
-        
-        if not story:
-            return
-        
-        # Download audio file
-        audio_file_path = await download_audio_file(story.audio_file_url)
-        
+    """Enhanced background task to process story with detailed progress tracking"""
+    
+    # Create a new database session for this background task
+    from app.core.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db_session:
+        audio_file_path = None
         try:
-            # Step 1: Transcribe audio
-            transcript_data = await SpeechToTextProcessor.transcribe_full_audio(
-                audio_file_path, 
-                story.language
+            # Update status: Starting processing
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.TRANSCRIBING, 
+                10, 
+                "Starting AI transcription with Gemini..."
+            )
+            
+            # Check Gemini configuration
+            if not genai_client:
+                error_msg = "Gemini AI client not configured. Please check GEMINI_API_KEY in settings."
+                print(f"❌ {error_msg}")
+                await update_processing_status(story_id, ProcessingStep.FAILED, 0, "AI service not available", error=error_msg)
+                return
+            
+            # Get story from database
+            result = await db_session.execute(select(Story).where(Story.id == story_id))
+            story = result.scalar_one_or_none()
+            
+            if not story:
+                error_msg = f"Story not found in database: {story_id}"
+                print(f"❌ {error_msg}")
+                await update_processing_status(story_id, ProcessingStep.FAILED, 0, "Story not found", error=error_msg)
+                return
+            
+            if not story.audio_file_url:
+                error_msg = f"No audio file URL found for story: {story_id}"
+                print(f"❌ {error_msg}")
+                await update_processing_status(story_id, ProcessingStep.FAILED, 0, "No audio file found", error=error_msg)
+                return
+            
+            # Download audio file
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.TRANSCRIBING, 
+                20, 
+                "Downloading audio file for processing..."
+            )
+            
+            print(f"🔄 Downloading audio file from: {story.audio_file_url}")
+            
+            try:
+                audio_file_path = await download_audio_file(story.audio_file_url)
+                print(f"✅ Audio file downloaded to: {audio_file_path}")
+            except Exception as download_error:
+                error_msg = f"Failed to download audio file: {str(download_error)}"
+                print(f"❌ {error_msg}")
+                await update_processing_status(story_id, ProcessingStep.FAILED, 0, "Audio download failed", error=error_msg)
+                return
+            
+            # Step 1: Transcribe audio with Gemini
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.TRANSCRIBING, 
+                30, 
+                "Transcribing audio with Gemini AI..."
+            )
+            
+            print(f"🔄 Starting transcription for story {story_id} with language: {story.language}")
+            
+            try:
+                transcript_data = await GeminiTranscriptionProcessor.transcribe_audio_with_gemini(
+                    audio_file_path, 
+                    story.language
+                )
+                print(f"✅ Transcription completed. Method: {transcript_data.get('method', 'unknown')}")
+                print(f"📝 Transcript length: {len(transcript_data.get('text', ''))}")
+            except Exception as transcription_error:
+                error_msg = f"Transcription failed: {str(transcription_error)}"
+                print(f"❌ {error_msg}")
+                await update_processing_status(story_id, ProcessingStep.FAILED, 0, "Transcription failed", error=error_msg)
+                return
+            
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.ENHANCING, 
+                50, 
+                "Enhancing transcript with AI...",
+                transcript_text=transcript_data["text"]
             )
             
             # Step 2: Enhance transcript
-            enhanced_text = await GeminiProcessor.enhance_transcript(
-                transcript_data["text"], 
-                story.language
+            try:
+                print(f"🔄 Enhancing transcript...")
+                enhanced_text = await GeminiProcessor.enhance_transcript(
+                    transcript_data["text"], 
+                    story.language
+                )
+                print(f"✅ Transcript enhanced. Length: {len(enhanced_text)}")
+            except Exception as enhancement_error:
+                print(f"⚠️ Enhancement failed, using original: {str(enhancement_error)}")
+                enhanced_text = transcript_data["text"]  # Fallback to original
+            
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.ANALYZING, 
+                70, 
+                "Analyzing cultural context and content...",
+                transcript_text=enhanced_text
             )
             
             # Step 3: Analyze content
@@ -859,27 +1294,87 @@ async def process_story_background(story_id: str, db: AsyncSession):
                 "storyteller_name": story.storyteller_name
             }
             
-            content_analysis = await GeminiProcessor.analyze_story_content(
-                enhanced_text, 
-                metadata
-            )
+            try:
+                print(f"🔄 Analyzing content...")
+                content_analysis = await GeminiProcessor.analyze_story_content(
+                    enhanced_text, 
+                    metadata
+                )
+                print(f"✅ Content analysis completed")
+            except Exception as analysis_error:
+                print(f"⚠️ Content analysis failed: {str(analysis_error)}")
+                content_analysis = {}  # Fallback to empty analysis
             
             # Step 4: Save transcript
-            transcript = Transcript(
-                story_id=story.id,
-                transcript_json={
-                    "original_text": transcript_data["text"],
-                    "enhanced_text": enhanced_text,
-                    "words": transcript_data["words"],
-                    "confidence": transcript_data["confidence"],
-                    "analysis": content_analysis
-                },
-                language=story.language
+            try:
+                print(f"🔄 Saving transcript to database...")
+                
+                # Validate and clean transcript data before saving
+                def validate_and_clean_transcript_data(transcript_data: Dict[str, Any]) -> Dict[str, Any]:
+                    """Validate and clean transcript data to ensure proper structure"""
+                    cleaned_data = transcript_data.copy()
+                    
+                    # Ensure words array is properly structured
+                    words_array = []
+                    if transcript_data.get("words"):
+                        words_array = GeminiTranscriptionProcessor.clean_words_array(transcript_data["words"])
+                    
+                    # If no valid words or significant data loss, regenerate from text
+                    if not words_array and transcript_data.get("text"):
+                        print(f"⚠️  No valid words found, regenerating from text...")
+                        words_array = GeminiTranscriptionProcessor.regenerate_words_from_text(transcript_data["text"])
+                    elif len(words_array) < len(transcript_data.get("words", [])) * 0.5:
+                        print(f"⚠️  Significant word data loss, regenerating from text...")
+                        if transcript_data.get("text"):
+                            words_array = GeminiTranscriptionProcessor.regenerate_words_from_text(transcript_data["text"])
+                    
+                    cleaned_data["words"] = words_array
+                    
+                    # Ensure required fields exist
+                    if "original_text" not in cleaned_data:
+                        cleaned_data["original_text"] = transcript_data.get("text", "")
+                    
+                    if "confidence" not in cleaned_data:
+                        cleaned_data["confidence"] = 0.8
+                    
+                    return cleaned_data
+                
+                # Clean and validate transcript data
+                cleaned_transcript_data = validate_and_clean_transcript_data(transcript_data)
+                
+                transcript = Transcript(
+                    story_id=story.id,
+                    transcript_json={
+                        "original_text": cleaned_transcript_data["text"],
+                        "enhanced_text": enhanced_text,
+                        "words": cleaned_transcript_data["words"],
+                        "confidence": cleaned_transcript_data["confidence"],
+                        "analysis": content_analysis,
+                        "transcription_method": cleaned_transcript_data.get("method", "gemini")
+                    },
+                    language=story.language,
+                    confidence_score=cleaned_transcript_data["confidence"]
+                )
+                
+                db_session.add(transcript)
+                print(f"✅ Transcript saved with {len(cleaned_transcript_data['words'])} words")
+            except Exception as save_error:
+                error_msg = f"Failed to save transcript: {str(save_error)}"
+                print(f"❌ {error_msg}")
+                await update_processing_status(story_id, ProcessingStep.FAILED, 0, "Database save failed", error=error_msg)
+                return
+            
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.TRANSLATING, 
+                85, 
+                "Generating translations...",
+                transcript_text=enhanced_text
             )
             
-            db.add(transcript)
-            
             # Step 5: Generate translations
+            print(f"🔄 Generating translations...")
+            translation_count = 0
             for target_lang in settings.TRANSLATION_TARGET_LANGUAGES:
                 if target_lang != story.language.split("-")[0]:  # Don't translate to same language
                     try:
@@ -888,61 +1383,214 @@ async def process_story_background(story_id: str, db: AsyncSession):
                             target_lang, 
                             story.language.split("-")[0]
                         )
-                    
+                        
+                        # Generate word-level timestamps for translation
+                        translation_words = []
+                        original_words_array = cleaned_transcript_data["words"]
+                        
+                        if original_words_array and len(original_words_array) > 0:
+                            # Map original words to translated text
+                            original_words = [word["word"] for word in original_words_array]
+                            translated_text = translation_result["translated_text"]
+                            
+                            # Clean and validate the translated text
+                            if translated_text and isinstance(translated_text, str):
+                                # Simple word mapping - split translated text into words
+                                import re
+                                translated_words = re.findall(r'\b\w+\b', translated_text)
+                                
+                                if translated_words:
+                                    # Estimate timing for translated words
+                                    total_duration = original_words_array[-1]["end_time"] if original_words_array else 0
+                                    
+                                    # Ensure we have a valid duration
+                                    if total_duration <= 0:
+                                        total_duration = len(original_words) * 0.5  # Fallback duration
+                                    
+                                    # Distribute translated words evenly across the total duration
+                                    word_duration = total_duration / len(translated_words)
+                                    
+                                    for i, word in enumerate(translated_words):
+                                        start_time = i * word_duration
+                                        end_time = (i + 1) * word_duration
+                                        
+                                        # Ensure timestamps are valid
+                                        if start_time < end_time:
+                                            translation_words.append({
+                                                "word": word,
+                                                "start_time": start_time,
+                                                "end_time": end_time
+                                            })
+                                
+                                # If no valid words were generated, create a fallback
+                                if not translation_words and translated_text:
+                                    translation_words = GeminiTranscriptionProcessor.regenerate_words_from_text(
+                                        translated_text, 
+                                        total_duration if total_duration > 0 else 300.0
+                                    )
+                        
+                        # Ensure we have valid translation words
+                        if not translation_words and translation_result.get("translated_text"):
+                            # Final fallback: generate from translated text
+                            translation_words = GeminiTranscriptionProcessor.regenerate_words_from_text(
+                                translation_result["translated_text"]
+                            )
+                        
+                        # Validate and clean translation words
+                        cleaned_translation_words = GeminiTranscriptionProcessor.clean_words_array(translation_words)
+                        
+                        # If cleaning resulted in significant loss, regenerate
+                        if len(cleaned_translation_words) < len(translation_words) * 0.5:
+                            print(f"⚠️  Significant translation word data loss, regenerating...")
+                            if translation_result.get("translated_text"):
+                                cleaned_translation_words = GeminiTranscriptionProcessor.regenerate_words_from_text(
+                                    translation_result["translated_text"]
+                                )
+                        
                         translation = Translation(
-                                story_id=story.id,
-                                translated_text=translation_result["translated_text"],
-                                language=target_lang
+                            story_id=story.id,
+                            translated_text=translation_result["translated_text"],
+                            language=target_lang,
+                            confidence_score=translation_result.get("confidence", 0.8)
                         )
                         
-                        db.add(translation)
+                        # Store translation with word-level timestamps
+                        translation.translation_json = {
+                            "text": translation_result["translated_text"],
+                            "words": cleaned_translation_words,
+                            "confidence": translation_result.get("confidence", 0.8),
+                            "method": translation_result.get("method", "google_translate")
+                        }
+                        
+                        db_session.add(translation)
+                        translation_count += 1
+                        print(f"✅ Translation to {target_lang} completed with {len(cleaned_translation_words)} words")
             
                     except Exception as e:
-                        print(f"Translation to {target_lang} failed: {e}")
+                        print(f"⚠️ Translation to {target_lang} failed: {e}")
             
-            # Step 6: Update story status
+            print(f"✅ Generated {translation_count} translations")
+            
+            # Step 6: Update story status to published
             story.status = StoryStatus.PUBLISHED
             
-            # Step 7: Initialize analytics
-            analytics = Analytics(
-                story_id=story.id,
-                views=0,
-                listens=0,
-                avg_rating=0.0
+            # Step 7: Update analytics
+            try:
+                analytics_result = await db_session.execute(select(Analytics).where(Analytics.story_id == story.id))
+                analytics = analytics_result.scalar_one_or_none()
+                
+                if analytics:
+                    # Update existing analytics with AI insights
+                    if content_analysis and content_analysis.get("sentiment"):
+                        analytics.sentiment_score = content_analysis["sentiment"].get("confidence", 0.5)
+                    if content_analysis and content_analysis.get("entities"):
+                        analytics.entities = content_analysis["entities"]
+                    if content_analysis and content_analysis.get("keywords"):
+                        analytics.keywords = content_analysis["keywords"]
+                    if content_analysis and content_analysis.get("cultural_context"):
+                        analytics.cultural_analysis = content_analysis["cultural_context"]
+                    print(f"✅ Analytics updated")
+            except Exception as analytics_error:
+                print(f"⚠️ Analytics update failed: {str(analytics_error)}")
+            
+            try:
+                await db_session.commit()
+                print(f"✅ All data committed to database")
+            except Exception as commit_error:
+                error_msg = f"Database commit failed: {str(commit_error)}"
+                print(f"❌ {error_msg}")
+                await update_processing_status(story_id, ProcessingStep.FAILED, 0, "Database commit failed", error=error_msg)
+                return
+            
+            # Final status update
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.PUBLISHED, 
+                100, 
+                "Story published successfully! ✨",
+                transcript_text=enhanced_text
             )
             
-            db.add(analytics)
-            await db.commit()
+            print(f"🎉 Story {story_id} processing completed successfully!")
+        
+        except Exception as e:
+            error_msg = f"Story processing failed with unexpected error: {str(e)}"
+            print(f"❌ {error_msg}")
+            print(f"❌ Exception type: {type(e).__name__}")
+            import traceback
+            print(f"❌ Traceback: {traceback.format_exc()}")
             
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.FAILED, 
+                0, 
+                "Story processing failed",
+                error=error_msg
+            )
+            
+            # Update story status to reflect error
+            try:
+                result = await db_session.execute(select(Story).where(Story.id == story_id))
+                story = result.scalar_one_or_none()
+                if story:
+                    story.status = StoryStatus.REJECTED
+                    await db_session.commit()
+                    print(f"📝 Story status updated to REJECTED")
+            except Exception as status_update_error:
+                print(f"❌ Failed to update story status: {str(status_update_error)}")
+        
         finally:
             # Clean up downloaded audio file
-            if os.path.exists(audio_file_path):
-                os.unlink(audio_file_path)
-            
-    except Exception as e:
-        print(f"Story processing failed for {story_id}: {e}")
-        # Update story status to reflect error
-        if story:
-            story.status = StoryStatus.REJECTED
-            await db.commit()
+            if audio_file_path and os.path.exists(audio_file_path):
+                try:
+                    os.unlink(audio_file_path)
+                    print(f"🧹 Cleaned up temporary audio file: {audio_file_path}")
+                except Exception as cleanup_error:
+                    print(f"⚠️ Failed to cleanup audio file: {str(cleanup_error)}")
 
 
 async def download_audio_file(audio_url: str) -> str:
-    """Download audio file from URL to temporary location"""
+    """Download audio file from URL to temporary location with better error handling"""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(audio_url)
-            response.raise_for_status()
+        print(f"🔄 Attempting to download from URL: {audio_url}")
+        
+        # Handle local file URLs
+        if audio_url.startswith('/media/files/'):
+            # This is a local file path
+            local_file_path = f"media/files{audio_url.replace('/media/files', '')}"
+            print(f"🔄 Local file path: {local_file_path}")
             
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-                temp_file.write(response.content)
-                return temp_file.name
+            if os.path.exists(local_file_path):
+                # Copy to temporary location
+                import shutil
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+                    shutil.copy2(local_file_path, temp_file.name)
+                    print(f"✅ Local file copied to: {temp_file.name}")
+                    return temp_file.name
+            else:
+                raise FileNotFoundError(f"Local file not found: {local_file_path}")
+        
+        # Handle full URLs
+        elif audio_url.startswith(('http://', 'https://')):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(audio_url)
+                response.raise_for_status()
+                
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+                    temp_file.write(response.content)
+                    print(f"✅ Remote file downloaded to: {temp_file.name}")
+                    return temp_file.name
+        
+        else:
+            raise ValueError(f"Unsupported audio URL format: {audio_url}")
                 
     except Exception as e:
+        error_msg = f"Failed to download audio file from {audio_url}: {str(e)}"
+        print(f"❌ {error_msg}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to download audio file: {str(e)}"
+            detail=error_msg
         )
 
 
@@ -1008,6 +1656,62 @@ async def get_story_analysis(
     }
 
 
+@router.get("/story/{story_id}/processing-status")
+async def get_story_processing_status(
+    story_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get real-time processing status for a story"""
+    
+    # Check if we have status in memory
+    if story_id in PROCESSING_STATUS_STORE:
+        return PROCESSING_STATUS_STORE[story_id]
+    
+    # Check database status
+    result = await db.execute(select(Story).where(Story.id == story_id))
+    story = result.scalar_one_or_none()
+    
+    if not story:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Story not found"
+        )
+    
+    # Determine status from story state
+    if story.status == StoryStatus.PROCESSING:
+        # Check if transcript exists
+        transcript_result = await db.execute(
+            select(Transcript).where(Transcript.story_id == story_id)
+        )
+        transcript = transcript_result.scalar_one_or_none()
+        
+        if transcript:
+            step = ProcessingStep.PUBLISHED
+            progress = 100
+            message = "Story processing completed"
+        else:
+            step = ProcessingStep.TRANSCRIBING
+            progress = 50
+            message = "Processing story with AI transcription..."
+    elif story.status == StoryStatus.PUBLISHED:
+        step = ProcessingStep.PUBLISHED
+        progress = 100
+        message = "Story published successfully"
+    else:
+        step = ProcessingStep.FAILED
+        progress = 0
+        message = "Story processing failed"
+    
+    status_obj = StoryProcessingStatus(
+        story_id=story_id,
+        current_step=step,
+        progress_percentage=progress,
+        message=message
+    )
+    
+    return status_obj
+
+
 @router.get("/voices")
 async def get_available_voices():
     """Get list of available TTS voices"""
@@ -1039,3 +1743,202 @@ async def ai_health_check():
         "tts_model": settings.TTS_MODEL,
         "swahili_support": True
     } 
+
+
+@router.get("/debug/story/{story_id}")
+async def debug_story_processing(
+    story_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Debug endpoint to check story processing status and details"""
+    
+    try:
+        # Get story from database
+        result = await db.execute(select(Story).where(Story.id == story_id))
+        story = result.scalar_one_or_none()
+        
+        if not story:
+            return {"error": "Story not found", "story_id": story_id}
+        
+        # Check if user has access
+        if story.contributor_id != current_user.id:
+            return {"error": "Access denied", "story_id": story_id}
+        
+        # Get transcript if exists
+        transcript_result = await db.execute(select(Transcript).where(Transcript.story_id == story_id))
+        transcript = transcript_result.scalar_one_or_none()
+        
+        # Check processing status
+        processing_status = PROCESSING_STATUS_STORE.get(story_id)
+        
+        # Check system configuration
+        system_config = {
+            "gemini_client": genai_client is not None,
+            "gemini_api_key_set": bool(settings.GEMINI_API_KEY),
+            "google_cloud_speech": speech_client is not None,
+            "google_cloud_translate": translate_instance is not None,
+            "audio_file_exists": bool(story.audio_file_url),
+            "audio_file_url": story.audio_file_url
+        }
+        
+        # Check if audio file is accessible
+        audio_accessible = False
+        audio_error = None
+        if story.audio_file_url:
+            try:
+                if story.audio_file_url.startswith('/media/files/'):
+                    # Local file
+                    local_path = f"media/files{story.audio_file_url.replace('/media/files', '')}"
+                    audio_accessible = os.path.exists(local_path)
+                    if not audio_accessible:
+                        audio_error = f"Local file not found: {local_path}"
+                elif story.audio_file_url.startswith(('http://', 'https://')):
+                    # Remote file - just check URL format
+                    audio_accessible = True
+                else:
+                    audio_error = f"Invalid URL format: {story.audio_file_url}"
+            except Exception as e:
+                audio_error = str(e)
+        
+        return {
+            "story": {
+                "id": str(story.id),
+                "title": story.title,
+                "language": story.language,
+                "status": story.status,
+                "audio_file_url": story.audio_file_url,
+                "created_at": story.created_at.isoformat()
+            },
+            "transcript": {
+                "exists": transcript is not None,
+                "language": transcript.language if transcript else None,
+                "confidence": transcript.confidence_score if transcript else None,
+                "has_text": bool(transcript and transcript.transcript_json.get("original_text")) if transcript else False
+            },
+            "processing_status": {
+                "in_memory": processing_status.dict() if processing_status else None,
+                "current_step": processing_status.current_step if processing_status else None
+            },
+            "system_config": system_config,
+            "audio_file": {
+                "accessible": audio_accessible,
+                "error": audio_error
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        return {
+            "error": f"Debug failed: {str(e)}",
+            "traceback": traceback.format_exc()
+        }
+
+
+@router.get("/debug/system")
+async def debug_system_status(current_user: User = Depends(get_current_active_user)):
+    """Debug endpoint to check overall system configuration"""
+    
+    return {
+        "ai_services": {
+            "gemini_client": genai_client is not None,
+            "gemini_tts_client": genai_tts_client is not None,
+            "google_cloud_speech": speech_client is not None,
+            "google_cloud_translate": translate_instance is not None,
+            "spacy_nlp": nlp is not None,
+            "sentiment_analyzer": sentiment_analyzer is not None
+        },
+        "configuration": {
+            "gemini_api_key_set": bool(settings.GEMINI_API_KEY),
+            "google_credentials_set": bool(settings.GOOGLE_APPLICATION_CREDENTIALS),
+            "supported_languages": settings.SUPPORTED_LANGUAGES,
+            "translation_targets": settings.TRANSLATION_TARGET_LANGUAGES,
+            "tts_model": settings.TTS_MODEL,
+            "tts_default_voice": settings.TTS_DEFAULT_VOICE,
+            "swahili_voices": settings.SWAHILI_VOICES
+        },
+        "processing_status_store": {
+            "active_stories": len(PROCESSING_STATUS_STORE),
+            "story_ids": list(PROCESSING_STATUS_STORE.keys())
+        }
+    } 
+
+
+@router.post("/debug/test-translation")
+async def test_translation(
+    text: str = Form(...),
+    target_language: str = Form(...),
+    source_language: str = Form(default="auto"),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Test translation service for debugging"""
+    
+    try:
+        result = await TranslationProcessor.translate_text(text, target_language, source_language)
+        return {
+            "success": True,
+            "result": result,
+            "services_available": {
+                "google_translate": translate_instance is not None,
+                "gemini": genai_client is not None
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "services_available": {
+                "google_translate": translate_instance is not None,
+                "gemini": genai_client is not None
+            }
+    } 
+
+
+@router.get("/debug/transcript-status")
+async def debug_transcript_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Debug endpoint to check transcript data status"""
+    try:
+        # Get transcript statistics
+        result = await db.execute(text("""
+            SELECT 
+                COUNT(*) as total_transcripts,
+                COUNT(CASE WHEN transcript_json->>'words' IS NOT NULL THEN 1 END) as with_words,
+                COUNT(CASE WHEN jsonb_array_length(transcript_json->'words') > 0 THEN 1 END) as with_valid_words
+            FROM transcripts
+        """))
+        stats = result.fetchone()
+        
+        # Get sample transcript data
+        sample_result = await db.execute(text("""
+            SELECT id, transcript_json->>'original_text' as text_preview, 
+                   jsonb_array_length(transcript_json->'words') as word_count
+            FROM transcripts 
+            LIMIT 3
+        """))
+        samples = sample_result.fetchall()
+        
+        return {
+            "status": "success",
+            "statistics": {
+                "total_transcripts": stats[0],
+                "transcripts_with_words_field": stats[1],
+                "transcripts_with_valid_words": stats[2]
+            },
+            "sample_data": [
+                {
+                    "id": str(sample[0]),
+                    "text_preview": sample[1][:100] + "..." if sample[1] and len(sample[1]) > 100 else sample[1],
+                    "word_count": sample[2]
+                }
+                for sample in samples
+            ]
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get transcript status: {str(e)}"
+        ) 

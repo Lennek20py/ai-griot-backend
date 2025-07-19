@@ -64,6 +64,7 @@ class Translation(Base):
     translated_text = Column(Text, nullable=False)
     language = Column(String, nullable=False)  # Target language
     confidence_score = Column(Float, nullable=True)
+    translation_json = Column(JSONB, nullable=True)  # Word-level timestamps for translation
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships

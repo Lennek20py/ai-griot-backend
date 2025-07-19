@@ -66,6 +66,23 @@ async def get_current_user_stories(
     # Convert to response models with relationships
     story_responses = []
     for story in stories:
+        # Extract analytics data to prevent any potential lazy loading issues
+        analytics_data = None
+        if story.analytics and len(story.analytics) > 0:
+            analytics_obj = story.analytics[0]
+            analytics_data = {
+                "id": str(analytics_obj.id),
+                "views": analytics_obj.views,
+                "listens": analytics_obj.listens,
+                "downloads": getattr(analytics_obj, 'downloads', 0),
+                "shares": getattr(analytics_obj, 'shares', 0),
+                "likes": getattr(analytics_obj, 'likes', 0),
+                "average_rating": analytics_obj.avg_rating,
+                "total_ratings": getattr(analytics_obj, 'total_ratings', 0),
+                "created_at": analytics_obj.created_at.isoformat(),
+                "updated_at": analytics_obj.updated_at.isoformat() if analytics_obj.updated_at else None
+            }
+        
         # Create comprehensive response manually to avoid ORM relationship issues
         response = StoryDetailResponse(
             # Basic story fields
@@ -102,7 +119,8 @@ async def get_current_user_stories(
                     "language": t.language,
                     "text": t.translated_text,
                     "confidence": t.confidence_score,
-                    "created_at": t.created_at.isoformat()
+                    "created_at": t.created_at.isoformat(),
+                    "words": t.translation_json.get("words", []) if t.translation_json else []
                 } for t in story.translations
             ] if story.translations else [],
             tags=[
@@ -113,18 +131,7 @@ async def get_current_user_stories(
                     "created_at": t.created_at.isoformat()
                 } for t in story.tags
             ] if story.tags else [],
-            analytics={
-                "id": str(story.analytics[0].id),
-                "views": story.analytics[0].views,
-                "listens": story.analytics[0].listens,
-                "downloads": getattr(story.analytics[0], 'downloads', 0),
-                "shares": getattr(story.analytics[0], 'shares', 0),
-                "likes": getattr(story.analytics[0], 'likes', 0),
-                "average_rating": story.analytics[0].avg_rating,
-                "total_ratings": getattr(story.analytics[0], 'total_ratings', 0),
-                "created_at": story.analytics[0].created_at.isoformat(),
-                "updated_at": story.analytics[0].updated_at.isoformat() if story.analytics[0].updated_at else None
-            } if story.analytics and len(story.analytics) > 0 else None
+            analytics=analytics_data
         )
         
         story_responses.append(response)
@@ -204,6 +211,23 @@ async def get_user_stories(
     # Convert to response models with relationships
     story_responses = []
     for story in stories:
+        # Extract analytics data to prevent any potential lazy loading issues
+        analytics_data = None
+        if story.analytics and len(story.analytics) > 0:
+            analytics_obj = story.analytics[0]
+            analytics_data = {
+                "id": str(analytics_obj.id),
+                "views": analytics_obj.views,
+                "listens": analytics_obj.listens,
+                "downloads": getattr(analytics_obj, 'downloads', 0),
+                "shares": getattr(analytics_obj, 'shares', 0),
+                "likes": getattr(analytics_obj, 'likes', 0),
+                "average_rating": analytics_obj.avg_rating,
+                "total_ratings": getattr(analytics_obj, 'total_ratings', 0),
+                "created_at": analytics_obj.created_at.isoformat(),
+                "updated_at": analytics_obj.updated_at.isoformat() if analytics_obj.updated_at else None
+            }
+        
         # Create comprehensive response manually to avoid ORM relationship issues
         response = StoryDetailResponse(
             # Basic story fields
@@ -240,7 +264,8 @@ async def get_user_stories(
                     "language": t.language,
                     "text": t.translated_text,
                     "confidence": t.confidence_score,
-                    "created_at": t.created_at.isoformat()
+                    "created_at": t.created_at.isoformat(),
+                    "words": t.translation_json.get("words", []) if t.translation_json else []
                 } for t in story.translations
             ] if story.translations else [],
             tags=[
@@ -251,18 +276,7 @@ async def get_user_stories(
                     "created_at": t.created_at.isoformat()
                 } for t in story.tags
             ] if story.tags else [],
-            analytics={
-                "id": str(story.analytics[0].id),
-                "views": story.analytics[0].views,
-                "listens": story.analytics[0].listens,
-                "downloads": getattr(story.analytics[0], 'downloads', 0),
-                "shares": getattr(story.analytics[0], 'shares', 0),
-                "likes": getattr(story.analytics[0], 'likes', 0),
-                "average_rating": story.analytics[0].avg_rating,
-                "total_ratings": getattr(story.analytics[0], 'total_ratings', 0),
-                "created_at": story.analytics[0].created_at.isoformat(),
-                "updated_at": story.analytics[0].updated_at.isoformat() if story.analytics[0].updated_at else None
-            } if story.analytics and len(story.analytics) > 0 else None
+            analytics=analytics_data
         )
         
         story_responses.append(response)
