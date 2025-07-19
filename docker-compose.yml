@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: digital_griot
+      POSTGRES_USER: griot_user
+      POSTGRES_PASSWORD: griot_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U griot_user -d digital_griot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for background tasks
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Digital Griot Backend
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://griot_user:griot_password@postgres:5432/digital_griot
+      - REDIS_URL=redis://redis:6379
+      - DEBUG=true
+      - SECRET_KEY=dev-secret-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker for background tasks
+  celery_worker:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://griot_user:griot_password@postgres:5432/digital_griot
+      - REDIS_URL=redis://redis:6379
+      - DEBUG=true
+      - SECRET_KEY=dev-secret-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: celery -A app.core.celery worker --loglevel=info
+
+  # Celery Beat for scheduled tasks
+  celery_beat:
+    build: .
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://griot_user:griot_password@postgres:5432/digital_griot
+      - REDIS_URL=redis://redis:6379
+      - DEBUG=true
+      - SECRET_KEY=dev-secret-key-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: celery -A app.core.celery beat --loglevel=info
+
+volumes:
+  postgres_data:
+  redis_data: 
