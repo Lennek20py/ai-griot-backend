@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user, get_password_hash
 from app.models.user import User, UserUpdate, UserResponse
-from app.models.story import Story, StoryResponse
+from app.models.story import Story, StoryResponse, StoryDetailResponse
 
 router = APIRouter()
 
@@ -39,7 +40,7 @@ async def update_current_user_profile(
     
     return current_user
 
-@router.get("/me/stories", response_model=List[StoryResponse])
+@router.get("/me/stories", response_model=List[StoryDetailResponse])
 async def get_current_user_stories(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
@@ -48,7 +49,13 @@ async def get_current_user_stories(
 ):
     """Get stories contributed by the current user."""
     result = await db.execute(
-        select(Story)
+        select(Story).options(
+            selectinload(Story.contributor),
+            selectinload(Story.transcript),
+            selectinload(Story.translations),
+            selectinload(Story.tags),
+            selectinload(Story.analytics)
+        )
         .where(Story.contributor_id == current_user.id)
         .offset(skip)
         .limit(limit)
@@ -59,25 +66,68 @@ async def get_current_user_stories(
     # Convert to response models with relationships
     story_responses = []
     for story in stories:
-        # Get related data
-        story_response = StoryResponse.from_orm(story)
-        story_response.contributor = UserResponse.from_orm(current_user)
+        # Create comprehensive response manually to avoid ORM relationship issues
+        response = StoryDetailResponse(
+            # Basic story fields
+            id=story.id,
+            title=story.title,
+            description=story.description,
+            storyteller_name=story.storyteller_name,
+            storyteller_bio=story.storyteller_bio,
+            language=story.language,
+            origin=story.origin,
+            consent_given=story.consent_given,
+            contributor_id=story.contributor_id,
+            audio_file_url=story.audio_file_url,
+            duration_seconds=story.duration_seconds,
+            file_size_bytes=story.file_size_bytes,
+            status=story.status,
+            created_at=story.created_at,
+            updated_at=story.updated_at,
+            
+            # Related data
+            contributor={
+                "id": str(current_user.id),
+                "email": current_user.email,
+                "full_name": current_user.full_name,
+                "bio": current_user.bio,
+                "is_active": current_user.is_active,
+                "created_at": current_user.created_at.isoformat(),
+                "updated_at": current_user.updated_at.isoformat() if current_user.updated_at else None
+            },
+            transcript=story.transcript.transcript_json if story.transcript else None,
+            translations=[
+                {
+                    "id": str(t.id),
+                    "language": t.language,
+                    "text": t.translated_text,
+                    "confidence": t.confidence_score,
+                    "created_at": t.created_at.isoformat()
+                } for t in story.translations
+            ] if story.translations else [],
+            tags=[
+                {
+                    "id": str(t.id),
+                    "name": t.name,
+                    "description": t.description,
+                    "created_at": t.created_at.isoformat()
+                } for t in story.tags
+            ] if story.tags else [],
+            analytics={
+                "id": str(story.analytics[0].id),
+                "views": story.analytics[0].views,
+                "listens": story.analytics[0].listens,
+                "downloads": getattr(story.analytics[0], 'downloads', 0),
+                "shares": getattr(story.analytics[0], 'shares', 0),
+                "likes": getattr(story.analytics[0], 'likes', 0),
+                "average_rating": story.analytics[0].avg_rating,
+                "total_ratings": getattr(story.analytics[0], 'total_ratings', 0),
+                "created_at": story.analytics[0].created_at.isoformat(),
+                "updated_at": story.analytics[0].updated_at.isoformat() if story.analytics[0].updated_at else None
+            } if story.analytics and len(story.analytics) > 0 else None
+        )
         
-        # Get transcript if exists
-        if story.transcript:
-            story_response.transcript = story.transcript
-        
-        # Get translations
-        story_response.translations = story.translations
-        
-        # Get tags
-        story_response.tags = story.tags
-        
-        # Get analytics
-        if story.analytics:
-            story_response.analytics = story.analytics
-        
-        story_responses.append(story_response)
+        story_responses.append(response)
     
     return story_responses
 
@@ -107,7 +157,7 @@ async def get_user_profile(
     
     return user
 
-@router.get("/{user_id}/stories", response_model=List[StoryResponse])
+@router.get("/{user_id}/stories", response_model=List[StoryDetailResponse])
 async def get_user_stories(
     user_id: str,
     db: AsyncSession = Depends(get_db),
@@ -134,9 +184,15 @@ async def get_user_stories(
             detail="User not found"
         )
     
-    # Get user's stories
+    # Get user's stories with relationships
     result = await db.execute(
-        select(Story)
+        select(Story).options(
+            selectinload(Story.contributor),
+            selectinload(Story.transcript),
+            selectinload(Story.translations),
+            selectinload(Story.tags),
+            selectinload(Story.analytics)
+        )
         .where(Story.contributor_id == user_uuid)
         .where(Story.status == "published")
         .offset(skip)
@@ -148,17 +204,67 @@ async def get_user_stories(
     # Convert to response models with relationships
     story_responses = []
     for story in stories:
-        story_response = StoryResponse.from_orm(story)
-        story_response.contributor = UserResponse.from_orm(user)
+        # Create comprehensive response manually to avoid ORM relationship issues
+        response = StoryDetailResponse(
+            # Basic story fields
+            id=story.id,
+            title=story.title,
+            description=story.description,
+            storyteller_name=story.storyteller_name,
+            storyteller_bio=story.storyteller_bio,
+            language=story.language,
+            origin=story.origin,
+            consent_given=story.consent_given,
+            contributor_id=story.contributor_id,
+            audio_file_url=story.audio_file_url,
+            duration_seconds=story.duration_seconds,
+            file_size_bytes=story.file_size_bytes,
+            status=story.status,
+            created_at=story.created_at,
+            updated_at=story.updated_at,
+            
+            # Related data
+            contributor={
+                "id": str(user.id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "bio": user.bio,
+                "is_active": user.is_active,
+                "created_at": user.created_at.isoformat(),
+                "updated_at": user.updated_at.isoformat() if user.updated_at else None
+            },
+            transcript=story.transcript.transcript_json if story.transcript else None,
+            translations=[
+                {
+                    "id": str(t.id),
+                    "language": t.language,
+                    "text": t.translated_text,
+                    "confidence": t.confidence_score,
+                    "created_at": t.created_at.isoformat()
+                } for t in story.translations
+            ] if story.translations else [],
+            tags=[
+                {
+                    "id": str(t.id),
+                    "name": t.name,
+                    "description": t.description,
+                    "created_at": t.created_at.isoformat()
+                } for t in story.tags
+            ] if story.tags else [],
+            analytics={
+                "id": str(story.analytics[0].id),
+                "views": story.analytics[0].views,
+                "listens": story.analytics[0].listens,
+                "downloads": getattr(story.analytics[0], 'downloads', 0),
+                "shares": getattr(story.analytics[0], 'shares', 0),
+                "likes": getattr(story.analytics[0], 'likes', 0),
+                "average_rating": story.analytics[0].avg_rating,
+                "total_ratings": getattr(story.analytics[0], 'total_ratings', 0),
+                "created_at": story.analytics[0].created_at.isoformat(),
+                "updated_at": story.analytics[0].updated_at.isoformat() if story.analytics[0].updated_at else None
+            } if story.analytics and len(story.analytics) > 0 else None
+        )
         
-        # Get related data
-        if story.transcript:
-            story_response.transcript = story.transcript
-        story_response.translations = story.translations
-        story_response.tags = story.tags
-        if story.analytics:
-            story_response.analytics = story.analytics
-        
-        story_responses.append(story_response)
+        story_responses.append(response)
     
     return story_responses 

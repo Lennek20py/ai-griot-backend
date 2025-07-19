@@ -72,7 +72,7 @@ async def create_story(
     
     return response
 
-@router.get("/", response_model=List[StoryResponse])
+@router.get("/", response_model=List[StoryDetailResponse])
 async def get_stories(
     db: AsyncSession = Depends(get_db),
     skip: int = Query(0, ge=0),
@@ -127,21 +127,72 @@ async def get_stories(
     # Convert to response models
     story_responses = []
     for story in stories:
-        story_response = StoryResponse.from_orm(story)
-        story_response.contributor = UserResponse.from_orm(story.contributor)
+        # Create comprehensive response manually to avoid ORM relationship issues
+        response = StoryDetailResponse(
+            # Basic story fields
+            id=story.id,
+            title=story.title,
+            description=story.description,
+            storyteller_name=story.storyteller_name,
+            storyteller_bio=story.storyteller_bio,
+            language=story.language,
+            origin=story.origin,
+            consent_given=story.consent_given,
+            contributor_id=story.contributor_id,
+            audio_file_url=story.audio_file_url,
+            duration_seconds=story.duration_seconds,
+            file_size_bytes=story.file_size_bytes,
+            status=story.status,
+            created_at=story.created_at,
+            updated_at=story.updated_at,
+            
+            # Related data
+            contributor={
+                "id": str(story.contributor.id),
+                "email": story.contributor.email,
+                "full_name": story.contributor.full_name,
+                "bio": story.contributor.bio,
+                "is_active": story.contributor.is_active,
+                "created_at": story.contributor.created_at.isoformat(),
+                "updated_at": story.contributor.updated_at.isoformat() if story.contributor.updated_at else None
+            } if story.contributor else None,
+            transcript=story.transcript.transcript_json if story.transcript else None,
+            translations=[
+                {
+                    "id": str(t.id),
+                    "language": t.language,
+                    "text": t.translated_text,
+                    "confidence": t.confidence_score,
+                    "created_at": t.created_at.isoformat()
+                } for t in story.translations
+            ] if story.translations else [],
+            tags=[
+                {
+                    "id": str(t.id),
+                    "name": t.name,
+                    "description": t.description,
+                    "created_at": t.created_at.isoformat()
+                } for t in story.tags
+            ] if story.tags else [],
+            analytics={
+                "id": str(story.analytics[0].id),
+                "views": story.analytics[0].views,
+                "listens": story.analytics[0].listens,
+                "downloads": getattr(story.analytics[0], 'downloads', 0),
+                "shares": getattr(story.analytics[0], 'shares', 0),
+                "likes": getattr(story.analytics[0], 'likes', 0),
+                "average_rating": story.analytics[0].avg_rating,
+                "total_ratings": getattr(story.analytics[0], 'total_ratings', 0),
+                "created_at": story.analytics[0].created_at.isoformat(),
+                "updated_at": story.analytics[0].updated_at.isoformat() if story.analytics[0].updated_at else None
+            } if story.analytics and len(story.analytics) > 0 else None
+        )
         
-        if story.transcript:
-            story_response.transcript = story.transcript
-        story_response.translations = story.translations
-        story_response.tags = story.tags
-        if story.analytics:
-            story_response.analytics = story.analytics
-        
-        story_responses.append(story_response)
+        story_responses.append(response)
     
     return story_responses
 
-@router.get("/{story_id}", response_model=StoryResponse)
+@router.get("/{story_id}", response_model=StoryDetailResponse)
 async def get_story(
     story_id: str,
     db: AsyncSession = Depends(get_db)
@@ -173,22 +224,72 @@ async def get_story(
         )
     
     # Increment view count
-    if story.analytics:
-        story.analytics.views += 1
+    if story.analytics and len(story.analytics) > 0:
+        story.analytics[0].views += 1
         await db.commit()
     
-    # Convert to response model
-    story_response = StoryResponse.from_orm(story)
-    story_response.contributor = UserResponse.from_orm(story.contributor)
+    # Create comprehensive response manually to avoid ORM relationship issues
+    response = StoryDetailResponse(
+        # Basic story fields
+        id=story.id,
+        title=story.title,
+        description=story.description,
+        storyteller_name=story.storyteller_name,
+        storyteller_bio=story.storyteller_bio,
+        language=story.language,
+        origin=story.origin,
+        consent_given=story.consent_given,
+        contributor_id=story.contributor_id,
+        audio_file_url=story.audio_file_url,
+        duration_seconds=story.duration_seconds,
+        file_size_bytes=story.file_size_bytes,
+        status=story.status,
+        created_at=story.created_at,
+        updated_at=story.updated_at,
+        
+        # Related data
+        contributor={
+            "id": str(story.contributor.id),
+            "email": story.contributor.email,
+            "full_name": story.contributor.full_name,
+            "bio": story.contributor.bio,
+            "is_active": story.contributor.is_active,
+            "created_at": story.contributor.created_at.isoformat(),
+            "updated_at": story.contributor.updated_at.isoformat() if story.contributor.updated_at else None
+        } if story.contributor else None,
+        transcript=story.transcript.transcript_json if story.transcript else None,
+        translations=[
+            {
+                "id": str(t.id),
+                "language": t.language,
+                "text": t.translated_text,
+                "confidence": t.confidence_score,
+                "created_at": t.created_at.isoformat()
+            } for t in story.translations
+        ] if story.translations else [],
+        tags=[
+            {
+                "id": str(t.id),
+                "name": t.name,
+                "description": t.description,
+                "created_at": t.created_at.isoformat()
+            } for t in story.tags
+        ] if story.tags else [],
+        analytics={
+            "id": str(story.analytics[0].id),
+            "views": story.analytics[0].views,
+            "listens": story.analytics[0].listens,
+            "downloads": getattr(story.analytics[0], 'downloads', 0),
+            "shares": getattr(story.analytics[0], 'shares', 0),
+            "likes": getattr(story.analytics[0], 'likes', 0),
+            "average_rating": story.analytics[0].avg_rating,
+            "total_ratings": getattr(story.analytics[0], 'total_ratings', 0),
+            "created_at": story.analytics[0].created_at.isoformat(),
+            "updated_at": story.analytics[0].updated_at.isoformat() if story.analytics[0].updated_at else None
+        } if story.analytics and len(story.analytics) > 0 else None
+    )
     
-    if story.transcript:
-        story_response.transcript = story.transcript
-    story_response.translations = story.translations
-    story_response.tags = story.tags
-    if story.analytics:
-        story_response.analytics = story.analytics
-    
-    return story_response
+    return response
 
 @router.put("/{story_id}", response_model=StoryResponse)
 async def update_story(
