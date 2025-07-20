@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     MAX_FILE_SIZE: int = 100 * 1024 * 1024  # 100MB
     ALLOWED_AUDIO_FORMATS: List[str] = [".mp3", ".wav", ".m4a", ".flac", ".ogg", ".webm"]
     
+    # Media storage settings
+    MEDIA_ROOT: str = "media"  # Directory for storing uploaded files and generated images
+    
     # AI Processing settings - Enhanced with Swahili focus
     SUPPORTED_LANGUAGES: List[str] = [
         "sw-KE",  # Swahili (Kenya) - Primary focus

@@ -1,7 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import uvicorn
 import os
@@ -24,9 +25,9 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Digital Griot API",
-    description="AI-powered platform for preserving and sharing oral traditions",
-    version="1.0.0",
+    title=settings.APP_NAME,
+    version=settings.VERSION,
+    openapi_url="/api/openapi.json",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
@@ -56,7 +57,7 @@ app.include_router(api_router, prefix="/api/v1")
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "message": "Digital Griot API is running"}
+    return {"status": "healthy", "version": settings.VERSION}
 
 # Root endpoint
 @app.get("/")
@@ -66,6 +67,22 @@ async def root():
         "version": "1.0.0",
         "docs": "/docs"
     }
+
+# Media serving endpoint for illustrations
+@app.get("/media/illustrations/{filename}")
+async def serve_illustration(filename: str):
+    """Serve generated illustration images"""
+    file_path = f"media/illustrations/{filename}"
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="image/png")
+    else:
+        # Return a placeholder image if file doesn't exist
+        placeholder_path = "media/placeholder.png"
+        if os.path.exists(placeholder_path):
+            return FileResponse(placeholder_path, media_type="image/png")
+        else:
+            # Create a simple placeholder
+            return {"error": "Image not found"}
 
 if __name__ == "__main__":
     uvicorn.run(

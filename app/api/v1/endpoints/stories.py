@@ -10,7 +10,7 @@ from app.core.security import get_current_active_user, get_current_active_user_o
 from app.models.user import User, UserResponse
 from app.models.story import (
     Story, StoryCreate, StoryUpdate, StoryResponse, StoryDetailResponse, StoryStatus,
-    Tag, TagCreate, TagResponse, Analytics, AnalyticsResponse
+    Tag, TagCreate, TagResponse, Analytics, AnalyticsResponse, Paragraph
 )
 
 router = APIRouter()
@@ -220,7 +220,8 @@ async def get_story(
             selectinload(Story.transcript),
             selectinload(Story.translations),
             selectinload(Story.tags),
-            selectinload(Story.analytics)
+            selectinload(Story.analytics),
+            selectinload(Story.paragraphs).selectinload(Paragraph.illustrations)
         ).where(Story.id == story_uuid)
     )
     story = result.scalar_one_or_none()
@@ -306,6 +307,30 @@ async def get_story(
                 "words": t.translation_json.get("words", []) if t.translation_json else []
             } for t in story.translations
         ] if story.translations else [],
+        paragraphs=[
+            {
+                "id": str(p.id),
+                "sequence_order": p.sequence_order,
+                "content": p.content,
+                "start_time": p.start_time,
+                "end_time": p.end_time,
+                "word_count": p.word_count,
+                "created_at": p.created_at.isoformat(),
+                "illustrations": [
+                    {
+                        "id": str(i.id),
+                        "image_url": i.image_url,
+                        "prompt_used": i.prompt_used,
+                        "style": i.style,
+                        "generation_metadata": {
+                            "status": i.status,
+                            "generation_time": i.generation_time
+                        },
+                        "created_at": i.created_at.isoformat()
+                    } for i in p.illustrations
+                ] if p.illustrations else []
+            } for p in story.paragraphs
+        ] if story.paragraphs else [],
         tags=[
             {
                 "id": str(t.id),

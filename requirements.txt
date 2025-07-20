@@ -34,3 +34,4 @@ librosa==0.10.1
 email-validator==2.2.0  # Required for pydantic email validation
 dnspython==2.7.0  # Required by email-validator
 aiofiles==23.2.1  # Required for async file operations
+Pillow==10.1.0  # Required for image processing and generation

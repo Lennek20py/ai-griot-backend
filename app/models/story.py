@@ -42,6 +42,7 @@ class Story(Base):
     translations = relationship("Translation", back_populates="story")
     tags = relationship("Tag", secondary="story_tags", back_populates="stories")
     analytics = relationship("Analytics", back_populates="story")
+    paragraphs = relationship("Paragraph", back_populates="story")
 
 class Transcript(Base):
     __tablename__ = "transcripts"
@@ -55,6 +56,39 @@ class Transcript(Base):
     
     # Relationships
     story = relationship("Story", back_populates="transcript")
+
+class Paragraph(Base):
+    __tablename__ = "paragraphs"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    story_id = Column(UUID(as_uuid=True), ForeignKey("stories.id"), nullable=False)
+    sequence_order = Column(Integer, nullable=False)  # Order of paragraph in story (was paragraph_index)
+    content = Column(Text, nullable=False)  # Paragraph text content (was text)
+    start_time = Column(Float, nullable=False)  # Start time in audio (seconds)
+    end_time = Column(Float, nullable=False)  # End time in audio (seconds)
+    language = Column(String, nullable=False)  # Language of the paragraph
+    word_count = Column(Integer, nullable=True)  # Number of words in paragraph
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    story = relationship("Story", back_populates="paragraphs")
+    illustrations = relationship("Illustration", back_populates="paragraph")
+
+class Illustration(Base):
+    __tablename__ = "illustrations"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    paragraph_id = Column(UUID(as_uuid=True), ForeignKey("paragraphs.id"), nullable=False)
+    image_url = Column(String, nullable=False)  # URL to generated image
+    prompt_used = Column(Text, nullable=False)  # The prompt used to generate the image
+    style = Column(String, nullable=True)  # Art style description (was style_description)
+    status = Column(String, nullable=True)  # Generation status
+    generation_time = Column(Float, nullable=True)  # Time taken to generate (seconds)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    paragraph = relationship("Paragraph", back_populates="illustrations")
 
 class Translation(Base):
     __tablename__ = "translations"
@@ -177,6 +211,52 @@ class StoryDetailResponse(BaseModel):
     translations: List[Dict[str, Any]] = []
     tags: List[Dict[str, Any]] = []
     analytics: Optional[Dict[str, Any]] = None
+    paragraphs: List[Dict[str, Any]] = []
+
+class ParagraphCreate(BaseModel):
+    story_id: str
+    sequence_order: int
+    content: str
+    start_time: float
+    end_time: float
+    language: str
+    word_count: Optional[int] = None
+
+class ParagraphResponse(BaseModel):
+    id: uuid.UUID
+    story_id: uuid.UUID
+    sequence_order: int
+    content: str
+    start_time: float
+    end_time: float
+    language: str
+    word_count: Optional[int] = None
+    created_at: datetime
+    illustrations: List[Dict[str, Any]] = []
+    
+    class Config:
+        from_attributes = True
+
+class IllustrationCreate(BaseModel):
+    paragraph_id: str
+    image_url: str
+    prompt_used: str
+    style: Optional[str] = None
+    status: Optional[str] = None
+    generation_time: Optional[float] = None
+
+class IllustrationResponse(BaseModel):
+    id: uuid.UUID
+    paragraph_id: uuid.UUID
+    image_url: str
+    prompt_used: str
+    style: Optional[str] = None
+    status: Optional[str] = None
+    generation_time: Optional[float] = None
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
 
 class TranscriptCreate(BaseModel):
     story_id: str

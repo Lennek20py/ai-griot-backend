@@ -36,8 +36,11 @@ from app.core.config import settings
 from app.models.user import User
 from app.models.story import (
     Story, StoryStatus, Transcript, Translation, Analytics,
-    TranscriptCreate, TranslationCreate
+    TranscriptCreate, TranslationCreate, Paragraph, Illustration
 )
+
+# Import illustration generation modules
+from app.tasks.illustration import ParagraphProcessor, IllustrationGenerator
 
 router = APIRouter()
 
@@ -942,6 +945,7 @@ class ProcessingStep(str, enum.Enum):
     ENHANCING = "enhancing"
     ANALYZING = "analyzing"
     TRANSLATING = "translating"
+    ILLUSTRATING = "illustrating"
     PUBLISHED = "published"
     FAILED = "failed"
 
@@ -1471,10 +1475,156 @@ async def process_story_background(story_id: str, db: AsyncSession):
             
             print(f"✅ Generated {translation_count} translations")
             
-            # Step 6: Update story status to published
+            # Step 6: Generate illustrations
+            await update_processing_status(
+                story_id, 
+                ProcessingStep.ILLUSTRATING, 
+                90, 
+                "Starting illustration generation...",
+                transcript_text=enhanced_text
+            )
+            
+            print(f"🔄 Generating illustrations for story paragraphs...")
+            
+            try:
+                # Split transcript into paragraphs
+                paragraphs = ParagraphProcessor.split_into_paragraphs(
+                    enhanced_text, 
+                    cleaned_transcript_data.get("words", [])
+                )
+                
+                print(f"📝 Split transcript into {len(paragraphs)} paragraphs")
+                
+                # Update status to show paragraph splitting
+                await update_processing_status(
+                    story_id, 
+                    ProcessingStep.ILLUSTRATING, 
+                    92, 
+                    f"Preparing {len(paragraphs)} paragraphs for illustration...",
+                    transcript_text=enhanced_text
+                )
+                
+                # Save paragraphs to database
+                saved_paragraphs = []
+                for i, paragraph_data in enumerate(paragraphs):
+                    paragraph = Paragraph(
+                        story_id=story.id,
+                        sequence_order=i,
+                        content=paragraph_data["text"],
+                        start_time=paragraph_data.get("start_time", 0.0),
+                        end_time=paragraph_data.get("end_time", 0.0),
+                        language=story.language,
+                        word_count=paragraph_data.get("word_count")
+                    )
+                    db_session.add(paragraph)
+                    saved_paragraphs.append(paragraph)
+                
+                # Commit paragraphs to get their IDs
+                await db_session.commit()
+                
+                # Update status before starting illustration generation
+                await update_processing_status(
+                    story_id, 
+                    ProcessingStep.ILLUSTRATING, 
+                    94, 
+                    "Starting AI image generation...",
+                    transcript_text=enhanced_text
+                )
+                
+                # Generate illustrations for each paragraph
+                illustration_count = 0
+                for i, (paragraph, paragraph_data) in enumerate(zip(saved_paragraphs, paragraphs)):
+                    try:
+                        # Update progress for each illustration with more detailed messages
+                        progress = 94 + (i * 4 // len(paragraphs))
+                        await update_processing_status(
+                            story_id, 
+                            ProcessingStep.ILLUSTRATING, 
+                            progress, 
+                            f"Generating illustration {i+1}/{len(paragraphs)}: '{paragraph_data['text'][:50]}...'",
+                            transcript_text=enhanced_text
+                        )
+                        
+                        # Add a small delay to make the process visible
+                        await asyncio.sleep(1)
+                        
+                        # Create illustration prompt
+                        prompt = IllustrationGenerator.create_illustration_prompt(
+                            paragraph_data["text"], 
+                            story.language,
+                            {
+                                "origin": story.origin,
+                                "storyteller_name": story.storyteller_name,
+                                "title": story.title
+                            }
+                        )
+                        
+                        # Generate image
+                        illustration_result = await IllustrationGenerator.generate_image_with_gemini(prompt)
+                        
+                        if illustration_result:
+                            # Save illustration to database
+                            illustration = Illustration(
+                                paragraph_id=paragraph.id,
+                                image_url=illustration_result["image_url"],
+                                prompt_used=illustration_result["prompt_used"],
+                                style=illustration_result["style_description"],
+                                status="completed",
+                                generation_time=2.5  # Simulated generation time
+                            )
+                            db_session.add(illustration)
+                            illustration_count += 1
+                            print(f"✅ Generated illustration {i+1}/{len(paragraphs)}")
+                            
+                            # Update status after successful generation
+                            await update_processing_status(
+                                story_id, 
+                                ProcessingStep.ILLUSTRATING, 
+                                progress + 1, 
+                                f"Completed illustration {i+1}/{len(paragraphs)}",
+                                transcript_text=enhanced_text
+                            )
+                        
+                    except Exception as e:
+                        print(f"⚠️ Failed to generate illustration for paragraph {i}: {e}")
+                        # Update status even on failure
+                        await update_processing_status(
+                            story_id, 
+                            ProcessingStep.ILLUSTRATING, 
+                            progress + 1, 
+                            f"Failed illustration {i+1}/{len(paragraphs)}, continuing...",
+                            transcript_text=enhanced_text
+                        )
+                
+                # Final illustration status update
+                await update_processing_status(
+                    story_id, 
+                    ProcessingStep.ILLUSTRATING, 
+                    98, 
+                    f"✅ Generated {illustration_count} illustrations successfully!",
+                    transcript_text=enhanced_text
+                )
+                
+                print(f"✅ Generated {illustration_count} illustrations")
+                
+                # Small delay before moving to final step
+                await asyncio.sleep(1)
+                
+            except Exception as illustration_error:
+                print(f"⚠️ Illustration generation failed: {str(illustration_error)}")
+                # Continue processing even if illustrations fail
+                await update_processing_status(
+                    story_id, 
+                    ProcessingStep.ILLUSTRATING, 
+                    98, 
+                    "Illustration generation failed, continuing with story...",
+                    transcript_text=enhanced_text
+                )
+            
+            # Step 7: Update story status to published
             story.status = StoryStatus.PUBLISHED
             
-            # Step 7: Update analytics
+            # Step 8: Update analytics
             try:
                 analytics_result = await db_session.execute(select(Analytics).where(Analytics.story_id == story.id))
                 analytics = analytics_result.scalar_one_or_none()
@@ -1942,3 +2092,50 @@ async def debug_transcript_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get transcript status: {str(e)}"
         ) 
+
+
+@router.post("/debug/test-illustration")
+async def test_illustration_generation(
+    text: str = Form(...),
+    language: str = Form(default="sw-KE"),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Test endpoint for illustration generation"""
+    try:
+        print(f"🧪 Testing illustration generation for text: {text[:100]}...")
+        
+        # Create illustration prompt
+        prompt = IllustrationGenerator.create_illustration_prompt(
+            text,
+            language,
+            {
+                "origin": "Test",
+                "storyteller_name": "Test Storyteller",
+                "title": "Test Story"
+            }
+        )
+        
+        print(f"📝 Generated prompt: {prompt[:200]}...")
+        
+        # Generate illustration
+        result = await IllustrationGenerator.generate_image_with_gemini(prompt)
+        
+        if result:
+            return {
+                "success": True,
+                "image_url": result["image_url"],
+                "prompt_used": result["prompt_used"],
+                "style_description": result["style_description"],
+                "generation_metadata": result["generation_metadata"]
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Illustration generation failed"
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        } 
